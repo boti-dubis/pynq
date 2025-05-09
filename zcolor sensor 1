@@ -1,0 +1,146 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <time.h>
+#include <libpynq.h>
+
+#define S0_PIN   4
+#define S1_PIN   5
+#define S2_PIN   6
+#define S3_PIN   7
+#define OUT_PIN  8
+
+// ————— detection thresholds —————————————————————————————————
+// If all three channels differ by ≤ EQ_TOL, we call it white/black.
+// Otherwise the smallest normalized channel → dominant colour.
+static const double EQ_TOL = 0.20;       // 20% “all equal” tolerance
+static const double DOM_THR = 0.80;      // dominant channel ≤ 80% of others
+// ————————————————————————————————————————————————————————————
+
+static double ts_to_us(const struct timespec *ts) {
+    return ts->tv_sec * 1e6 + ts->tv_nsec / 1e3;
+}
+
+static double pulseInLow(int pin, double timeout_us) {
+    struct timespec start, now, t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+
+    // wait for stray LOW to clear
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (ts_to_us(&now) - ts_to_us(&start) > timeout_us) return 0;
+    } while (gpio_get_level(pin) == 0);
+
+    // wait for LOW to start
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (ts_to_us(&now) - ts_to_us(&start) > timeout_us) return 0;
+    } while (gpio_get_level(pin) != 0);
+
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    // wait for LOW to end
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        if (ts_to_us(&now) - ts_to_us(&start) > timeout_us) return 0;
+    } while (gpio_get_level(pin) == 0);
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    return ts_to_us(&t1) - ts_to_us(&t0);
+}
+
+// read a single RGB sample (µs)
+static void read_rgb(double *r, double *g, double *b) {
+    // Red filter
+    gpio_set_level(S2_PIN, GPIO_LEVEL_LOW);
+    gpio_set_level(S3_PIN, GPIO_LEVEL_LOW);
+    *r = pulseInLow(OUT_PIN, 1e6);
+    // Green
+    gpio_set_level(S2_PIN, GPIO_LEVEL_HIGH);
+    gpio_set_level(S3_PIN, GPIO_LEVEL_HIGH);
+    *g = pulseInLow(OUT_PIN, 1e6);
+    // Blue
+    gpio_set_level(S2_PIN, GPIO_LEVEL_LOW);
+    gpio_set_level(S3_PIN, GPIO_LEVEL_HIGH);
+    *b = pulseInLow(OUT_PIN, 1e6);
+}
+
+// map raw→[0..1] using two reference points
+static double normalize(double raw, double black_ref, double white_ref) {
+    // clamp
+    if (raw <= black_ref) return 0.0;
+    if (raw >= white_ref) return 1.0;
+    // linear interpolate
+    return (raw - black_ref) / (white_ref - black_ref);
+}
+
+// once we have normalized rc,gc,bc (each [0..1]), detect:
+static const char* detect_color(double rc, double gc, double bc) {
+    // find min & max
+    double maxv = rc > gc ? (rc > bc ? rc : bc) : (gc > bc ? gc : bc);
+    double minv = rc < gc ? (rc < bc ? rc : bc) : (gc < bc ? gc : bc);
+
+    // all roughly equal?
+    if ((maxv - minv) <= EQ_TOL * maxv) {
+        return (maxv > 0.5) ? "White" : "Black";
+    }
+    // dominant-channel: smallest ≤ DOM_THR × each other
+    if (rc == minv && rc <= DOM_THR * gc && rc <= DOM_THR * bc) return "Red";
+    if (gc == minv && gc <= DOM_THR * rc && gc <= DOM_THR * bc) return "Green";
+    if (bc == minv && bc <= DOM_THR * rc && bc <= DOM_THR * gc) return "Blue";
+    return "Unknown";
+}
+
+int main(void) {
+    double wb_r, wb_g, wb_b;
+    double bb_r, bb_g, bb_b;  // white/black references
+
+    pynq_init();
+    gpio_set_direction(S0_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(S1_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(S2_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(S3_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(OUT_PIN, GPIO_DIR_INPUT);
+
+    // set 20% frequency scaling
+    gpio_set_level(S0_PIN, GPIO_LEVEL_LOW);
+    gpio_set_level(S1_PIN, GPIO_LEVEL_HIGH);
+
+    // 1) White calibration
+    printf("Place a WHITE target and press Enter…");
+    getchar();
+    read_rgb(&wb_r, &wb_g, &wb_b);
+
+    // 2) Black calibration
+    printf("Place a BLACK target and press Enter…");
+    getchar();
+    read_rgb(&bb_r, &bb_g, &bb_b);
+
+    printf(
+      "Calibrated:\n"
+      "  White ref → R=%.0f  G=%.0f  B=%.0f\n"
+      "  Black ref → R=%.0f  G=%.0f  B=%.0f\n\n",
+      wb_r, wb_g, wb_b, bb_r, bb_g, bb_b
+    );
+
+    puts("Starting detection (Ctrl-C to stop)…");
+    while (1) {
+        double r, g, b;
+        read_rgb(&r, &g, &b);
+
+        // normalize each channel
+        double rc = normalize(r, bb_r, wb_r);
+        double gc = normalize(g, bb_g, wb_g);
+        double bc = normalize(b, bb_b, wb_b);
+
+        const char *col = detect_color(rc, gc, bc);
+
+        // print raw, normalized and result
+        printf("Raw:   R=%5.0f  G=%5.0f  B=%5.0f  → %s\n", r, g, b, col);
+        printf("Norm:  R=%1.3f  G=%1.3f  B=%1.3f\n\n", rc, gc, bc);
+
+        sleep(1);
+    }
+
+    pynq_destroy();
+    return 0;
+}
