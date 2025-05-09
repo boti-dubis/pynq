@@ -1,0 +1,98 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <time.h>
+#include <libpynq.h>
+
+#define SYSFS_GPIO_DIR "/sys/class/gpio"
+#define MAX_BUF        64
+
+// change these if you wire to different AR pins
+#define S0_PIN   4   // AR4 → exported as gpio4
+#define S1_PIN   5
+#define S2_PIN   6
+#define S3_PIN   7
+#define OUT_PIN  8
+
+// helper to get monotonic time in microseconds
+static double ts_to_us(const struct timespec *ts) {
+    return ts->tv_sec * 1e6 + ts->tv_nsec / 1e3;
+}
+
+// replicate Arduino pulseIn(pin, LOW) — measures LOW pulse width in µs
+static double pulseInLow(int pin, double timeout_us) {
+    struct timespec start_ts, now_ts, t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &start_ts);
+
+    // wait for any existing LOW to end (so we start fresh)
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        if (ts_to_us(&now_ts) - ts_to_us(&start_ts) > timeout_us)
+            return 0;
+    } while (gpio_get_level(pin) == 0);
+
+    // wait for LOW to start
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        if (ts_to_us(&now_ts) - ts_to_us(&start_ts) > timeout_us)
+            return 0;
+    } while (gpio_get_level(pin) != 0);
+
+    // record start of LOW pulse
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+
+    // wait for LOW to end
+    do {
+        clock_gettime(CLOCK_MONOTONIC, &now_ts);
+        if (ts_to_us(&now_ts) - ts_to_us(&start_ts) > timeout_us)
+            return 0;
+    } while (gpio_get_level(pin) == 0);
+
+    // record end of LOW pulse
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+
+    return ts_to_us(&t1) - ts_to_us(&t0);
+}
+
+int main(void) {
+    pynq_init();
+
+    // configure pins
+    gpio_set_direction(S0_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(S1_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(S2_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(S3_PIN, GPIO_DIR_OUTPUT);
+    gpio_set_direction(OUT_PIN, GPIO_DIR_INPUT);
+
+    // 3) frequency scale = 20%  (S0=1, S1=0)
+    gpio_set_level(S0_PIN, GPIO_LEVEL_HIGH);
+    gpio_set_level(S1_PIN, GPIO_LEVEL_LOW);
+
+    printf("TCS3200 @ AR4–AR8 reading. Ctrl-C to stop.\n");
+    while (1) {
+        double r, g, b;
+
+        // red filter
+        gpio_set_level(S2_PIN, GPIO_LEVEL_LOW);
+        gpio_set_level(S3_PIN, GPIO_LEVEL_LOW);
+        r = pulseInLow(OUT_PIN, 1e6);
+
+        // green filter
+        gpio_set_level(S2_PIN, GPIO_LEVEL_HIGH);
+        gpio_set_level(S3_PIN, GPIO_LEVEL_HIGH);
+        g = pulseInLow(OUT_PIN, 1e6);
+
+        // blue filter
+        gpio_set_level(S2_PIN, GPIO_LEVEL_LOW);
+        gpio_set_level(S3_PIN, GPIO_LEVEL_HIGH);
+        b = pulseInLow(OUT_PIN, 1e6);
+
+        printf("R = %6.0f µs   G = %6.0f µs   B = %6.0f µs\n",
+               r, g, b);
+        sleep(1);
+    }
+
+    pynq_destroy();
+    return 0;
+}
