@@ -1,0 +1,124 @@
+#include <libpynq.h>
+#include <stdio.h>
+#include <math.h>
+
+#define PEAK_THRESHOLD 1.65
+#define SLEEP_MSEC 10
+
+#define LAST_FEW 3
+#define BPM_MIN 60
+#define BPM_MAX 240
+#define JUMP_RANGE 10
+#define MAX_LINES 13
+
+void drawTextOnLine(display_t *display, FontxFile *font, const char *text, int line, uint16_t color, uint16_t fontHeight) {
+    int y = fontHeight * line;
+    if (y > (DISPLAY_HEIGHT - fontHeight)) {
+        printf("Line %d is out of display bounds.\n", line);
+        return;
+    }
+    displayDrawString(display, font, 0, y, (uint8_t *)text, color);
+}
+
+int main(void) {
+    pynq_init();
+
+    display_t display;
+    display_init(&display);
+    display_set_flip(&display, true, true);
+    displayFillScreen(&display, RGB_BLACK);
+
+    uint8_t buffer_fx16G[FontxGlyphBufSize];
+    uint8_t fontWidth_fx16G, fontHeight_fx16G;
+    FontxFile fx16G[2];
+    InitFontx(fx16G, "/boot/ILGH16XB.FNT", "");
+    GetFontx(fx16G, 0, buffer_fx16G, &fontWidth_fx16G, &fontHeight_fx16G);
+
+
+    // initialize UART 0
+    switchbox_set_pin(IO_AR0, SWB_UART0_TX);  
+    uart_init(UART0);
+    uart_reset_fifos(UART0);
+
+
+    adc_init();
+    printf("ADC initialized.\n");
+
+    int line = 0;
+    float sum = 0;         // To keep a running sum of the BPM values
+    int count = 0;         // To count the number of BPM values added
+    float average = 0;     // To store the calculated average
+
+
+    while (1) {
+        int timeElapsed = 0;
+        float bpm;
+        float prev_bpm = -1.0;
+
+        while (1) {
+            while (adc_read_channel(ADC0) < PEAK_THRESHOLD) {
+                sleep_msec(SLEEP_MSEC);
+                timeElapsed += SLEEP_MSEC;
+            }
+
+            while (adc_read_channel(ADC0) >= PEAK_THRESHOLD) {
+                sleep_msec(SLEEP_MSEC);
+                timeElapsed += SLEEP_MSEC;
+            }
+
+            float interval = (timeElapsed / 1000.0);
+            if (interval == 0) continue;
+
+            bpm = 60.0 / interval;
+
+            if (prev_bpm > 0 && (bpm < prev_bpm - JUMP_RANGE || bpm > prev_bpm + JUMP_RANGE)) {
+                break;
+            }
+
+                // Update the sum and count
+            sum += bpm;
+            count++;
+                // Calculate the average every LAST_FEW values
+            if (count == LAST_FEW) {
+                average = sum / LAST_FEW;   // Calculate average
+                printf("Average BPM: %.2f\n", average);
+
+                // Reset the sum and count
+                sum = 0;
+                count = 0;
+            }
+
+
+            prev_bpm = bpm;
+            printf("Real-time BPM: %.2f\n", bpm);
+
+
+            char text[32];
+            snprintf(text, sizeof(text), "%.2f\n", bpm);  // Append a newline
+
+            int i = 0;
+            while (text[i] != '\0') {
+                uart_send(UART0, (uint8_t)text[i]);
+                i++;
+            }
+
+            // Clear the screen after the 13th turn
+            if (line == MAX_LINES) {
+                displayFillScreen(&display, RGB_BLACK);  // Clear the entire screen
+                line = 0;  // Reset the line counter
+            }
+
+            // Display the BPM on the current line
+            drawTextOnLine(&display, fx16G, text, line, RGB_GREEN, fontHeight_fx16G);
+
+            // Increment the line
+            line++;
+        }
+    }
+
+    adc_destroy();
+    display_destroy(&display);
+    pynq_destroy();
+
+    return EXIT_SUCCESS;
+}
