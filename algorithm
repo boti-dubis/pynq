@@ -1,0 +1,177 @@
+#include <stdio.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <libpynq.h>
+ 
+#define SIZE 5
+ 
+const double frequencies[5] = {0.2, 0.35, 0.5, 0.65, 0.7};
+const int amplitudes[5] = {20, 40, 60, 80, 100};
+ 
+float matrix[SIZE][SIZE];
+ 
+int directions[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+
+
+ 
+bool is_in_bounds(int x, int y) {
+    return x >= 0 && x < SIZE && y >= 0 && y < SIZE;
+}
+ 
+void calculate_frequency_amplitude(int row, int col, double *freq, int *amp) {
+    *freq = frequencies[col];
+    *amp = amplitudes[row];
+}
+ 
+void fillEntryValue(int nx, int ny) {
+ 
+    uart_reset_fifos(UART0);
+ 
+    printf("listening\n");
+ 
+    char buffer[32];  // Buffer to store received characters
+    int index = 0;
+    float number;
+   
+    bool number_received = false;
+   
+    while (!number_received) {
+ 
+        uint8_t msg = uart_recv(UART0);
+        if (msg == '\n' || index >= (int)sizeof(buffer) - 1) {
+            buffer[index] = '\0';
+            number = atof(buffer); // Convert string to float
+            printf("Received number: %f\n", number);
+            number_received = true; // Exit condition
+        } else {
+            buffer[index++] = (char)msg;
+        }
+    }
+ 
+    float stress = number;
+    //* receiveVolume(); // Get the stress level
+    matrix[nx][ny] = stress;   // Assign it to the matrix
+    printf("Assigned stress level %d to cell (%d, %d)\n", stress, nx, ny);
+}
+ 
+void print_neighbor_info(int x, int y, bool visited[SIZE][SIZE]) {
+    printf("Frequency and amplitude information of neighbors of (%d, %d):\n", x, y);
+ 
+    // Checks all neighbors and prints the corresponding frequency and amplitude that are sent to the actuators.
+    for (int i = 0; i < 4; i++) {
+        int nx = x + directions[i][0];
+        int ny = y + directions[i][1];
+        fillEntryValue(nx,ny); // Assign a stress level to the neighboring entry.
+        if (is_in_bounds(nx, ny) && !visited[nx][ny]) {  // Only print if the neighbor is not visited
+            double freq;
+            int amp;
+            calculate_frequency_amplitude(nx, ny, &freq, &amp);
+            printf("Neighbor (%d, %d): Frequency = %.2f Hz, Amplitude = %d%%\n", nx, ny, freq, amp);
+        }
+    }
+}
+ 
+void drawMatrix(display_t *display)  {
+    int i, j;
+    for (j = 10; j < 230; j += 44) {
+        i = 10;
+        for (i = 10; i < 230; i += 44) {
+            displayDrawRect(display, i, j, i + 44, j + 44, RGB_WHITE);
+        }
+    }
+}
+ 
+void fillEntry(display_t *display, int *basePtr, int *cellPtr, int cols, int *row, int *col, int color) {
+    int offset = cellPtr - basePtr;
+    int x1, x2, y1, y2;
+    *row = offset / cols;
+    *col = offset % cols;
+ 
+    x1 = 10 + (*col * 44) + 2;
+    y1 = 10 + (*row * 44) + 2;
+    x2 = x1 + 40;
+    y2 = y1 + 40;
+ 
+    displayDrawFillRect(display, x1, y1, x2, y2, color);
+}
+ 
+void find_shortest_path(display_t *display, int start_x, int start_y) {
+    int x = start_x, y = start_y;
+ 
+    bool visited[SIZE][SIZE] = {{false}};
+ 
+    visited[x][y] = true;
+    fillEntry(display, &matrix[0][0], &matrix[x][y], SIZE, &x, &y, RGB_GREEN);
+    printf("Starting at (%d, %d) with stress level %d\n", x, y, matrix[x][y]);
+ 
+    while (matrix[x][y] != 1) {
+        int min_stress = matrix[x][y];
+        int next_x = -1, next_y = -1;
+ 
+        print_neighbor_info(x, y, visited);
+        for (int i = 0; i < 4; i++) {
+            int nx = x + directions[i][0];
+            int ny = y + directions[i][1];
+ 
+            if (is_in_bounds(nx, ny) && !visited[nx][ny]) {
+                if (matrix[nx][ny] < matrix[x][y]) {
+                    if (matrix[nx][ny] < min_stress) {
+                        min_stress = matrix[nx][ny];
+                        next_x = nx;
+                        next_y = ny;
+                    }
+                } else {
+                    fillEntry(display, &matrix[0][0], &matrix[nx][ny], SIZE, &nx, &ny, RGB_RED);
+                }
+            }
+        }
+ 
+        if (next_x != -1 && next_y != -1) {
+            printf("Moving to (%d, %d) with stress level %d\n", next_x, next_y, matrix[next_x][next_y]);
+            visited[next_x][next_y] = true;
+            x = next_x;
+            y = next_y;
+ 
+            fillEntry(display, &matrix[0][0], &matrix[x][y], SIZE, &x, &y, RGB_GREEN);
+        } else {
+            printf("No valid move from (%d, %d) with stress level %d\n", x, y, matrix[x][y]);
+            break;
+        }
+ 
+        sleep(1);
+    }
+ 
+    if (matrix[x][y] == 1) {
+        printf("Reached stress level 1 at (%d, %d)\n", x, y);
+        fillEntry(display, &matrix[0][0], &matrix[x][y], SIZE, &x, &y, RGB_GREEN);
+    }
+}
+ 
+int main(void) {
+ 
+    display_t display;
+    display_init(&display);
+ 
+    displayFillScreen(&display, RGB_BLACK);
+    drawMatrix(&display);
+ 
+    switchbox_set_pin(IO_AR0, SWB_UART0_RX);
+    switchbox_set_pin(IO_AR1, SWB_UART0_TX);
+    switchbox_set_pin(IO_AR2, SWB_UART1_RX);
+    switchbox_set_pin(IO_AR3, SWB_UART1_TX);
+ 
+    pynq_init();
+ 
+    uart_init(UART0);
+    uart_init(UART1);
+ 
+    fillEntryValue(4,4);
+ 
+    find_shortest_path(&display, 4, 4);
+ 
+    display_destroy(&display);
+    pynq_destroy();
+ 
+    return EXIT_SUCCESS;
+}
