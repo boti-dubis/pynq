@@ -1,0 +1,13 @@
+#include <libpynq.h>
+#include <stdio.h>
+
+int main(void) {
+    adc_init();
+    while(1){
+        double Vin = adc_read_channel(ADC2);
+        printf("Voltage: %.2f V\n", Vin);
+
+        sleep_msec(25);
+    }
+    adc_destroy();
+}
