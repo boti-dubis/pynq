@@ -1,0 +1,45 @@
+#include <libpynq.h> 
+
+int main (void) 
+
+{ 
+
+ // initialise all I/O 
+
+ pynq_init(); 
+
+ switchbox_set_pin(IO_AR1, SWB_UART0_RX); 
+
+ // initialize UART channel 0 
+
+ uart_init(UART0); 
+
+ // flush FIFOs of UART 0 
+
+ uart_reset_fifos (UART0); 
+
+  
+
+ printf("listening\n"); 
+
+ do { 
+
+   // get a byte from UART 0 
+
+   uint8_t msg = uart_recv(UART0); 
+
+   printf("received byte %d\n", msg); 
+
+ } while (1); 
+
+  
+
+  // clean up after use 
+
+  pynq_destroy(); 
+
+  return EXIT_SUCCESS; 
+
+} 
+
+ 
